@@ -1,0 +1,42 @@
+name: Processar corte de podcast
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  processar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar o repositório
+        uses: actions/checkout@v4
+
+      - name: Instalar ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: pip install -r scripts/requirements.txt
+
+      - name: Rodar pipeline (checar episódio novo, cortar, mandar de volta)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python scripts/main.py
+
+      - name: Salvar estado (pra não reprocessar o mesmo episódio)
+        run: |
+          git config user.name "cortes-bot"
+          git config user.email "cortes-bot@users.noreply.github.com"
+          git add state.json
+          git diff --cached --quiet || git commit -m "Atualiza estado do bot"
+          git push
