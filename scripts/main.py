@@ -83,7 +83,7 @@ def download_via_ytdlp(url, dest_path_no_ext):
     """Baixa o link (YouTube, Instagram ou TikTok) usando yt-dlp."""
     ydl_opts = {
         "outtmpl": dest_path_no_ext + ".%(ext)s",
-        "format": "mp4/bestvideo+bestaudio/best",
+        "format": "bestvideo+bestaudio/best",
         "merge_output_format": "mp4",
         "quiet": True,
         "noplaylist": True,
