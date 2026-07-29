@@ -76,13 +76,11 @@ def get_new_link_update(state):
     return url
 
 
-def download_via_ytdlp(url, dest_path_no_ext):
-    """Baixa o link (YouTube ou Instagram) usando yt-dlp.
+COOKIES_FILE = "cookies.txt"
 
-    Só funciona bem em conteúdo PÚBLICO. Conteúdo que exige login
-    (ex: stories privados) precisa de cookies e não está coberto nesta
-    versão — ver README.
-    """
+
+def download_via_ytdlp(url, dest_path_no_ext):
+    """Baixa o link (YouTube, Instagram ou TikTok) usando yt-dlp."""
     ydl_opts = {
         "outtmpl": dest_path_no_ext + ".%(ext)s",
         "format": "mp4/bestvideo+bestaudio/best",
@@ -90,10 +88,11 @@ def download_via_ytdlp(url, dest_path_no_ext):
         "quiet": True,
         "noplaylist": True,
     }
+    if pathlib.Path(COOKIES_FILE).exists():
+        ydl_opts["cookiefile"] = COOKIES_FILE
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
 
-    # Acha o arquivo baixado (extensão pode variar)
     parent = pathlib.Path(dest_path_no_ext).parent
     stem = pathlib.Path(dest_path_no_ext).name
     for f in parent.glob(f"{stem}.*"):
@@ -102,6 +101,7 @@ def download_via_ytdlp(url, dest_path_no_ext):
 
 
 def transcribe(audio_path):
+    size_mb = os.path.getsize(audio_path) / (1024 * 1024)
     with open(audio_path, "rb") as f:
         r = requests.post(
             f"{GROQ_API}/audio/transcriptions",
@@ -109,7 +109,11 @@ def transcribe(audio_path):
             files={"file": f},
             data={"model": "whisper-large-v3", "response_format": "verbose_json"},
         )
-    r.raise_for_status()
+    if not r.ok:
+        raise RuntimeError(
+            f"Groq recusou a transcrição (arquivo de {size_mb:.1f}MB, "
+            f"HTTP {r.status_code}): {r.text[:500]}"
+        )
     return r.json()
 
 
@@ -137,7 +141,8 @@ def find_highlight(transcript):
             "response_format": {"type": "json_object"},
         },
     )
-    r.raise_for_status()
+    if not r.ok:
+        raise RuntimeError(f"Groq recusou a análise (HTTP {r.status_code}): {r.text[:500]}")
     content = r.json()["choices"][0]["message"]["content"]
     return json.loads(content)
 
@@ -213,20 +218,24 @@ def main():
             )
             return
 
-        transcript = transcribe(source_path)
-        highlight = find_highlight(transcript)
+        try:
+            transcript = transcribe(source_path)
+            highlight = find_highlight(transcript)
 
-        out_path = os.path.join(tmp, "corte.mp4")
-        cut_and_format(
-            source_path,
-            float(highlight["start"]),
-            float(highlight["end"]),
-            transcript.get("segments", []),
-            out_path,
-            tmp,
-        )
+            out_path = os.path.join(tmp, "corte.mp4")
+            cut_and_format(
+                source_path,
+                float(highlight["start"]),
+                float(highlight["end"]),
+                transcript.get("segments", []),
+                out_path,
+                tmp,
+            )
 
-        send_result(out_path, highlight.get("legenda", ""))
+            send_result(out_path, highlight.get("legenda", ""))
+        except Exception as e:
+            tg_send_message(f"Deu erro processando o corte. Motivo: {e}")
+            raise
 
     tg_send_message("Corte pronto! Dá uma olhada e posta no TikTok se estiver bom 🚀")
 
