@@ -8,7 +8,8 @@ Fluxo:
 3. Baixa o vídeo do link com yt-dlp.
 4. Transcreve o episódio (Groq Whisper).
 5. Pede pra uma IA achar o trecho mais forte pra virar corte (Groq Llama).
-6. Corta esse trecho com ffmpeg, redimensiona pra 9:16 e queima a legenda.
+6. Corta esse trecho e monta o layout: vídeo rodando em cima, faixa
+   vermelha com a legenda no meio, foto parada (do próprio vídeo) embaixo.
 7. Manda o corte pronto de volta pra você no Telegram, pra revisar e postar.
 
 NADA disso posta automaticamente no TikTok — essa etapa fica com você de
@@ -182,9 +183,16 @@ def find_highlight(transcript):
         "Você é um editor de cortes virais de podcast brasileiro. "
         "Aqui está a transcrição com timestamps em segundos:\n\n"
         f"{transcript_text}\n\n"
-        "Escolha o TRECHO MAIS FORTE pra virar um corte de 30 a 60 segundos "
-        "(momento de maior impacto, polêmica, humor ou insight, que funcione "
-        "sozinho fora de contexto). Responda SOMENTE em JSON no formato: "
+        "Procure um GATILHO DE INÍCIO DE ASSUNTO — a frase exata onde a "
+        "pessoa começa a anunciar ou puxar um tópico novo. Exemplos do "
+        "tipo de frase que conta como gatilho: uma promessa/ensinamento "
+        "('vou te ensinar a ganhar dinheiro', 'vou te contar como...'), "
+        "ou a menção de algo que chama atenção logo no começo do assunto "
+        "('cantei muito com o Lenny Tavarez', 'uma vez eu...'). O corte "
+        "DEVE começar bem no início dessa frase-gatilho, nunca no meio de "
+        "um pensamento já em andamento. Depois, escolha o fim do corte "
+        "onde esse mesmo assunto se resolve ou perde força — NO MÁXIMO 60 "
+        "segundos de duração total. Responda SOMENTE em JSON no formato: "
         '{"start": <segundos, número>, "end": <segundos, número>, '
         '"legenda": "<legenda curta e chamativa pro TikTok>"}'
     )
@@ -227,18 +235,52 @@ def write_srt(segments, clip_start, clip_end, path):
     pathlib.Path(path).write_text("\n".join(lines), encoding="utf-8")
 
 
+def extract_still_frame(source_path, timestamp, out_path):
+    """Tira uma foto (frame parado) do vídeo num instante específico."""
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", str(timestamp), "-i", source_path,
+        "-frames:v", "1",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True)
+
+
 def cut_and_format(source_path, start, end, segments, out_path, work_dir):
-    duration = max(1.0, end - start)
+    """Monta o corte no layout: vídeo rodando em cima, faixa vermelha com a
+    legenda no meio, e uma foto parada (tirada do próprio vídeo) embaixo.
+
+    Aviso: a faixa vermelha aqui é uma cor sólida — não replica o efeito de
+    "papel rasgado" de templates prontos, isso exigiria um recurso gráfico
+    à parte.
+    """
+    duration = max(1.0, min(60.0, end - start))
     srt_path = os.path.join(work_dir, "clip.srt")
     write_srt(segments, start, end, srt_path)
 
-    vf = f"crop=ih*9/16:ih,scale=1080:1920,subtitles='{srt_path}'"
+    frame_path = os.path.join(work_dir, "frame.jpg")
+    extract_still_frame(source_path, start + duration / 2, frame_path)
+
+    filter_complex = (
+        "[0:v]scale=1080:860:force_original_aspect_ratio=increase,"
+        "crop=1080:860,setsar=1[top];"
+        "[1:v]scale=1080:860:force_original_aspect_ratio=increase,"
+        "crop=1080:860,setsar=1[bottom];"
+        f"[2:v]subtitles='{srt_path}':force_style="
+        "'Fontsize=26,PrimaryColour=&HFFFFFF&,Bold=1,Alignment=5,"
+        "MarginV=0'[capbar];"
+        "[top][capbar][bottom]vstack=inputs=3[outv]"
+    )
+
     cmd = [
         "ffmpeg", "-y",
         "-ss", str(start), "-i", source_path, "-t", str(duration),
-        "-vf", vf,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-        "-c:a", "aac", "-b:a", "128k",
+        "-loop", "1", "-t", str(duration), "-i", frame_path,
+        "-f", "lavfi", "-t", str(duration), "-i", "color=c=red:s=1080x200:r=25",
+        "-filter_complex", filter_complex,
+        "-map", "[outv]", "-map", "0:a",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-c:a", "aac", "-b:a", "192k",
         out_path,
     ]
     subprocess.run(cmd, check=True)
