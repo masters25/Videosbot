@@ -2,8 +2,8 @@
 Pipeline de corte automático de podcast — versão "cola o link".
 
 Fluxo:
-1. Você manda o LINK do episódio (YouTube, Instagram ou TikTok) por texto
-   pro seu bot do Telegram.
+1. Você manda o LINK do episódio (YouTube ou Instagram) por texto pro seu
+   bot do Telegram.
 2. Este script (rodando no GitHub Actions) detecta a mensagem nova.
 3. Baixa o vídeo do link com yt-dlp.
 4. Transcreve o episódio (Groq Whisper).
@@ -319,4 +319,81 @@ def cut_and_format(source_path, start, end, segments, words, out_path, work_dir)
 
     cmd = [
         "ffmpeg", "-y",
-        "-ss", str(start), "-i", source_path
+        "-ss", str(start), "-i", source_path, "-t", str(duration),
+        "-loop", "1", "-t", str(duration), "-i", frame_path,
+        "-f", "lavfi", "-t", str(duration), "-i", "color=c=red:s=1080x200:r=25",
+        "-filter_complex", filter_complex,
+        "-map", "[outv]", "-map", "0:a",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-c:a", "aac", "-b:a", "192k",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True)
+
+
+def send_result(video_path, caption):
+    with open(video_path, "rb") as f:
+        requests.post(
+            f"{TELEGRAM_API}/sendVideo",
+            data={"chat_id": CHAT_ID, "caption": caption[:1024]},
+            files={"video": f},
+        )
+
+
+def main():
+    state = load_state()
+    url = get_new_link_update(state)
+    save_state(state)
+
+    if not url:
+        print("Nenhum link novo.")
+        return
+
+    tg_send_message("Recebi o link! Baixando e processando o corte...")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            source_path = download_via_ytdlp(url, os.path.join(tmp, "episodio"))
+        except Exception as e:
+            tg_send_message(
+                f"Não consegui baixar esse link (pode ser conteúdo privado ou "
+                f"que exige login). Erro: {e}"
+            )
+            return
+
+        if not check_has_audio(source_path):
+            formatos = list_formats_diagnostic(url)
+            print("Formatos disponíveis para esse link:\n" + formatos)
+            tg_send_message(
+                "O vídeo baixou, mas sem nenhuma trilha de áudio (nem a "
+                "música de fundo). Provavelmente essa plataforma não libera "
+                "essa faixa específica pra download. Detalhes no log do "
+                "GitHub Actions (aba Actions → essa execução → log completo)."
+            )
+            return
+
+        try:
+            transcript = transcribe(source_path)
+            highlight = find_highlight(transcript)
+
+            out_path = os.path.join(tmp, "corte.mp4")
+            cut_and_format(
+                source_path,
+                float(highlight["start"]),
+                float(highlight["end"]),
+                transcript.get("segments") or [],
+                transcript.get("words") or [],
+                out_path,
+                tmp,
+            )
+
+            send_result(out_path, highlight.get("legenda", ""))
+        except Exception as e:
+            tg_send_message(f"Deu erro processando o corte. Motivo: {e}")
+            raise
+
+    tg_send_message("Corte pronto! Dá uma olhada e posta no TikTok se estiver bom 🚀")
+
+
+if __name__ == "__main__":
+    main()
