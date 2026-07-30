@@ -164,11 +164,12 @@ def transcribe(audio_path):
             f"{GROQ_API}/audio/transcriptions",
             headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
             files={"file": f},
-            data={
-                "model": "whisper-large-v3",
-                "response_format": "verbose_json",
-                "timestamp_granularities[]": "word",
-            },
+            data=[
+                ("model", "whisper-large-v3"),
+                ("response_format", "verbose_json"),
+                ("timestamp_granularities[]", "segment"),
+                ("timestamp_granularities[]", "word"),
+            ],
         )
     if not r.ok:
         raise RuntimeError(
@@ -179,7 +180,7 @@ def transcribe(audio_path):
 
 
 def find_highlight(transcript):
-    segments = transcript.get("segments", [])
+    segments = transcript.get("segments") or []
     transcript_text = "\n".join(
         f'[{s["start"]:.1f}-{s["end"]:.1f}] {s["text"]}' for s in segments
     )
@@ -380,8 +381,8 @@ def main():
                 source_path,
                 float(highlight["start"]),
                 float(highlight["end"]),
-                transcript.get("segments", []),
-                transcript.get("words", []),
+                transcript.get("segments") or [],
+                transcript.get("words") or [],
                 out_path,
                 tmp,
             )
