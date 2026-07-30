@@ -164,7 +164,11 @@ def transcribe(audio_path):
             f"{GROQ_API}/audio/transcriptions",
             headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
             files={"file": f},
-            data={"model": "whisper-large-v3", "response_format": "verbose_json"},
+            data={
+                "model": "whisper-large-v3",
+                "response_format": "verbose_json",
+                "timestamp_granularities[]": "word",
+            },
         )
     if not r.ok:
         raise RuntimeError(
@@ -191,10 +195,12 @@ def find_highlight(transcript):
         "('cantei muito com o Lenny Tavarez', 'uma vez eu...'). O corte "
         "DEVE começar bem no início dessa frase-gatilho, nunca no meio de "
         "um pensamento já em andamento. Depois, escolha o fim do corte "
-        "onde esse mesmo assunto se resolve ou perde força — NO MÁXIMO 60 "
-        "segundos de duração total. Responda SOMENTE em JSON no formato: "
-        '{"start": <segundos, número>, "end": <segundos, número>, '
-        '"legenda": "<legenda curta e chamativa pro TikTok>"}'
+        "onde esse mesmo assunto se resolve ou perde força. Tente deixar "
+        "o corte o mais próximo possível de 60 segundos (entre 45 e 60 "
+        "segundos, nunca menos que isso a não ser que o assunto realmente "
+        "acabe antes) — evite cortes curtos demais. Responda SOMENTE em "
+        'JSON no formato: {"start": <segundos, número>, "end": <segundos, '
+        'número>, "legenda": "<legenda curta e chamativa pro TikTok>"}'
     )
     r = requests.post(
         f"{GROQ_API}/chat/completions",
@@ -235,6 +241,41 @@ def write_srt(segments, clip_start, clip_end, path):
     pathlib.Path(path).write_text("\n".join(lines), encoding="utf-8")
 
 
+def write_karaoke_srt(words, clip_start, clip_end, path, group_size=3):
+    """Legenda estilo karaokê: mostra só um pequeno grupo de palavras por
+    vez, trocando conforme a fala avança, em vez da frase inteira parada."""
+    lines = []
+    idx = 1
+    buffer = []
+
+    def flush():
+        nonlocal idx
+        if not buffer:
+            return
+        s = buffer[0][0] - clip_start
+        e = buffer[-1][1] - clip_start
+        text = " ".join(t for _, _, t in buffer)
+        lines.append(str(idx))
+        lines.append(f"{format_srt_timestamp(max(0, s))} --> {format_srt_timestamp(max(0, e))}")
+        lines.append(text)
+        lines.append("")
+        idx += 1
+
+    for w in words:
+        wstart, wend = w.get("start"), w.get("end")
+        wtext = (w.get("word") or "").strip()
+        if wstart is None or wend is None or not wtext:
+            continue
+        if wend <= clip_start or wstart >= clip_end:
+            continue
+        buffer.append((max(wstart, clip_start), min(wend, clip_end), wtext))
+        if len(buffer) >= group_size:
+            flush()
+            buffer = []
+    flush()
+    pathlib.Path(path).write_text("\n".join(lines), encoding="utf-8")
+
+
 def extract_still_frame(source_path, timestamp, out_path):
     """Tira uma foto (frame parado) do vídeo num instante específico."""
     cmd = [
@@ -246,7 +287,7 @@ def extract_still_frame(source_path, timestamp, out_path):
     subprocess.run(cmd, check=True)
 
 
-def cut_and_format(source_path, start, end, segments, out_path, work_dir):
+def cut_and_format(source_path, start, end, segments, words, out_path, work_dir):
     """Monta o corte no layout: vídeo rodando em cima, faixa vermelha com a
     legenda no meio, e uma foto parada (tirada do próprio vídeo) embaixo.
 
@@ -256,7 +297,10 @@ def cut_and_format(source_path, start, end, segments, out_path, work_dir):
     """
     duration = max(1.0, min(60.0, end - start))
     srt_path = os.path.join(work_dir, "clip.srt")
-    write_srt(segments, start, end, srt_path)
+    if words:
+        write_karaoke_srt(words, start, start + duration, srt_path)
+    else:
+        write_srt(segments, start, start + duration, srt_path)
 
     frame_path = os.path.join(work_dir, "frame.jpg")
     extract_still_frame(source_path, start + duration / 2, frame_path)
@@ -266,9 +310,9 @@ def cut_and_format(source_path, start, end, segments, out_path, work_dir):
         "crop=1080:860,setsar=1[top];"
         "[1:v]scale=1080:860:force_original_aspect_ratio=increase,"
         "crop=1080:860,setsar=1[bottom];"
-        f"[2:v]subtitles='{srt_path}':force_style="
-        "'Fontsize=26,PrimaryColour=&HFFFFFF&,Bold=1,Alignment=5,"
-        "MarginV=0'[capbar];"
+        f"[2:v]subtitles='{srt_path}':original_size=1080x200:force_style="
+        "'Fontsize=64,PrimaryColour=&HFFFFFF&,Bold=1,Alignment=5,"
+        "MarginV=0,MarginL=20,MarginR=20'[capbar];"
         "[top][capbar][bottom]vstack=inputs=3[outv]"
     )
 
@@ -337,6 +381,7 @@ def main():
                 float(highlight["start"]),
                 float(highlight["end"]),
                 transcript.get("segments", []),
+                transcript.get("words", []),
                 out_path,
                 tmp,
             )
