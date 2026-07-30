@@ -2,8 +2,8 @@
 Pipeline de corte automático de podcast — versão "cola o link".
 
 Fluxo:
-1. Você manda o LINK do episódio (YouTube ou Instagram) por texto pro seu
-   bot do Telegram.
+1. Você manda o LINK do episódio (YouTube, Instagram ou TikTok) por texto
+   pro seu bot do Telegram.
 2. Este script (rodando no GitHub Actions) detecta a mensagem nova.
 3. Baixa o vídeo do link com yt-dlp.
 4. Transcreve o episódio (Groq Whisper).
@@ -112,6 +112,22 @@ def check_has_audio(path):
     return "audio" in streams
 
 
+def format_for_url(url):
+    """Cada plataforma entrega o arquivo de um jeito diferente:
+
+    - YouTube separa vídeo e áudio em faixas distintas (precisa pedir os
+      dois e deixar o yt-dlp juntar).
+    - TikTok e Instagram normalmente já entregam um único arquivo com
+      vídeo+áudio juntos — pedir "bestvideo+bestaudio" nesses casos pode
+      fazer o yt-dlp tentar juntar a mesma faixa com ela mesma e perder o
+      áudio no processo, então aqui é melhor só pedir "best" direto.
+    """
+    dominio = url.lower()
+    if "youtube.com" in dominio or "youtu.be" in dominio:
+        return "bestvideo+bestaudio/best"
+    return "best"
+
+
 def download_via_ytdlp(url, dest_path_no_ext):
     """Baixa o link (YouTube, Instagram ou TikTok) usando yt-dlp.
 
@@ -121,7 +137,7 @@ def download_via_ytdlp(url, dest_path_no_ext):
     """
     ydl_opts = {
         "outtmpl": dest_path_no_ext + ".%(ext)s",
-        "format": "bestvideo+bestaudio/best",
+        "format": format_for_url(url),
         "merge_output_format": "mp4",
         "quiet": True,
         "noplaylist": True,
@@ -129,7 +145,8 @@ def download_via_ytdlp(url, dest_path_no_ext):
     if pathlib.Path(COOKIES_FILE).exists():
         ydl_opts["cookiefile"] = COOKIES_FILE
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+        info = ydl.extract_info(url, download=True)
+    print(f"Formato baixado: {info.get('format_id')} / {info.get('format')}")
 
     # Acha o arquivo baixado (extensão pode variar)
     parent = pathlib.Path(dest_path_no_ext).parent
