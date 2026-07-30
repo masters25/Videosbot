@@ -79,8 +79,46 @@ def get_new_link_update(state):
 COOKIES_FILE = "cookies.txt"
 
 
+def list_formats_diagnostic(url):
+    """Lista os formatos que a plataforma está oferecendo pra esse link,
+    sem baixar nada — só pra diagnóstico."""
+    ydl_opts = {"quiet": True, "noplaylist": True, "skip_download": True}
+    if pathlib.Path(COOKIES_FILE).exists():
+        ydl_opts["cookiefile"] = COOKIES_FILE
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        formats = info.get("formats", []) or []
+        linhas = []
+        for f in formats:
+            linhas.append(
+                f"id={f.get('format_id')} vcodec={f.get('vcodec')} "
+                f"acodec={f.get('acodec')} ext={f.get('ext')} "
+                f"nota={f.get('format_note')}"
+            )
+        return "\n".join(linhas) if linhas else "(nenhum formato listado)"
+    except Exception as e:
+        return f"(não consegui listar formatos: {e})"
+
+
+def check_has_audio(path):
+    """Usa ffprobe pra checar se o arquivo baixado tem alguma trilha de áudio."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type",
+         "-of", "csv=p=0", path],
+        capture_output=True, text=True,
+    )
+    streams = result.stdout.strip().splitlines()
+    return "audio" in streams
+
+
 def download_via_ytdlp(url, dest_path_no_ext):
-    """Baixa o link (YouTube, Instagram ou TikTok) usando yt-dlp."""
+    """Baixa o link (YouTube, Instagram ou TikTok) usando yt-dlp.
+
+    Se existir um cookies.txt na raiz do repositório (escrito pelo workflow
+    a partir do segredo YOUTUBE_COOKIES), usa ele pra autenticar — ajuda a
+    driblar bloqueios de login, mas não garante 100% de sucesso.
+    """
     ydl_opts = {
         "outtmpl": dest_path_no_ext + ".%(ext)s",
         "format": "bestvideo+bestaudio/best",
@@ -93,6 +131,7 @@ def download_via_ytdlp(url, dest_path_no_ext):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
 
+    # Acha o arquivo baixado (extensão pode variar)
     parent = pathlib.Path(dest_path_no_ext).parent
     stem = pathlib.Path(dest_path_no_ext).name
     for f in parent.glob(f"{stem}.*"):
@@ -215,6 +254,17 @@ def main():
             tg_send_message(
                 f"Não consegui baixar esse link (pode ser conteúdo privado ou "
                 f"que exige login). Erro: {e}"
+            )
+            return
+
+        if not check_has_audio(source_path):
+            formatos = list_formats_diagnostic(url)
+            print("Formatos disponíveis para esse link:\n" + formatos)
+            tg_send_message(
+                "O vídeo baixou, mas sem nenhuma trilha de áudio (nem a "
+                "música de fundo). Provavelmente essa plataforma não libera "
+                "essa faixa específica pra download. Detalhes no log do "
+                "GitHub Actions (aba Actions → essa execução → log completo)."
             )
             return
 
